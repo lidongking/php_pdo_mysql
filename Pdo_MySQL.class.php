@@ -142,6 +142,7 @@ class Pdo_MySQL
 
     public function table($table)
     {
+        $this->init();
         $this->table = $table;
 
         return $this;
