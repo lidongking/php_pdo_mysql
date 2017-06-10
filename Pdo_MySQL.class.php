@@ -67,7 +67,7 @@ class Pdo_MySQL
      *
      * @param string $dbKey 数据库标示Key
      *
-     * @return mixed 当前DB实例
+     * @return static 当前DB实例
      */
     public static function getInstance($dbKey = 'default')
     {
@@ -104,8 +104,10 @@ class Pdo_MySQL
         }
         if ($this->pdo)
         {
-            // $this->pdo->setAttribute( PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION );
-            $this->pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+            $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $this->pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, true);
+            $this->pdo->setAttribute(PDO::ATTR_AUTOCOMMIT, 0);
+            $this->pdo->setAttribute(PDO::ATTR_TIMEOUT, 2);
             $this->pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
             $this->pdo->exec("SET NAMES {$this->charset}");
         }
@@ -115,11 +117,22 @@ class Pdo_MySQL
      * 功    能：获取pdo对象,以便直接操作pdo
      * 修改日期：2017-6-4
      *
-     * @return mixed pdo对象
+     * @return Pdo pdo对象
      */
     public function getPdo()
     {
         return $this->pdo;
+    }
+
+    /**
+     * 功    能：获取pdoStatement对象
+     * 修改日期：2017-6-10
+     *
+     * @return PDOStatement pdoStatement对象
+     */
+    protected function getPdoStatement()
+    {
+        return $this->pdoStatement;
     }
 
     /**
@@ -143,7 +156,7 @@ class Pdo_MySQL
     public function table($table)
     {
         $this->init();
-        $this->table = $table;
+        $this->table = $this->tablePrefix . $table;
 
         return $this;
     }
@@ -152,15 +165,19 @@ class Pdo_MySQL
      * 功    能：选择数据库
      * 修改日期：2017-6-6
      *
-     * @param array $fields 字段
+     * @param array|string $fields 字段
      *
      * @return $this 返回当前对象，链式操作
      */
     public function select($fields = array())
     {
         $this->queryType = 'S';
-        $filedStr = empty($fields) ? '*' : '`' . implode('`,`', $fields) . '`';
-        $this->sql = 'SELECT ' . $filedStr . ' FROM `' . $this->tablePrefix . $this->table . '`';
+        empty($fields) && $fields = '*';
+        $fieldStr = '';
+        is_array($fields) && $fieldStr = '`' . implode('`,`', $fields) . '`';
+        is_string($fields) && $fieldStr = $fields;
+
+        $this->sql = 'SELECT ' . $fieldStr . ' FROM `' . $this->table . '`';
 
         return $this;
     }
@@ -187,8 +204,7 @@ class Pdo_MySQL
         }
         $updateStr = '';
         $update && $updateStr = ' ON DUPLICATE KEY UPDATE ' . implode(',', $updates);
-        $this->sql = 'INSERT INTO `' . $this->tablePrefix . $this->table . '`(`' . implode('`,`', $fields) . '`) VALUES(' . $values . ')'
-            . $updateStr;
+        $this->sql = 'INSERT INTO `' . $this->table . '`(`' . implode('`,`', $fields) . '`) VALUES(' . $values . ')' . $updateStr;
 
         foreach ($data as $key => $val)
         {
@@ -205,6 +221,7 @@ class Pdo_MySQL
         // 多行插入
         $fields = array_keys($first);
         $pos = 0;
+        $values = array();
         foreach ($data as $key => $val)
         {
             foreach ($val as $kkey => $vval)
@@ -224,8 +241,7 @@ class Pdo_MySQL
         }
         $updateStr = '';
         $update && $updateStr = ' ON DUPLICATE KEY UPDATE ' . implode(',', $updates);
-        $this->sql = 'INSERT INTO `' . $this->tablePrefix . $this->table . '`(`' . implode('`,`', $fields) . '`) VALUES' . $valuesAll
-            . $updateStr;
+        $this->sql = 'INSERT INTO `' . $this->table . '`(`' . implode('`,`', $fields) . '`) VALUES' . $valuesAll . $updateStr;
 
         return $this;
     }
@@ -241,13 +257,13 @@ class Pdo_MySQL
     public function update($data)
     {
         $this->queryType = 'U';
-
+        $sets = array();
         foreach ($data as $key => $val)
         {
             $sets[] = "`{$key}` = :{$key}";
         }
         $setStr = implode(', ', $sets);
-        $this->sql = 'UPDATE `' . $this->tablePrefix . $this->table . '` SET ' . $setStr;
+        $this->sql = 'UPDATE `' . $this->table . '` SET ' . $setStr;
         $this->data = $data;
 
         return $this;
@@ -262,7 +278,7 @@ class Pdo_MySQL
     public function delete()
     {
         $this->queryType = 'D';
-        $this->sql = 'DELETE FROM `' . $this->tablePrefix . $this->table . '`';
+        $this->sql = "DELETE FROM `{$this->table}`";
 
         return $this;
     }
@@ -351,7 +367,8 @@ class Pdo_MySQL
      */
     public function execute()
     {
-        if ($this->pdo)
+        $pdo = $this->getPdo();
+        if ($pdo)
         {
             switch ($this->queryType)
             {
@@ -366,11 +383,17 @@ class Pdo_MySQL
                     break;
             }
 
-            if ($this->pdoStatement = $this->pdo->prepare($this->sql))
+            if ($this->pdoStatement = $pdo->prepare($this->sql))
             {
                 foreach ($this->data as $key => $val)
                 {
-                    if (!$this->pdoStatement->bindValue(':' . $key, $val))
+                    $type = PDO::PARAM_STR;
+                    if ($key == 'offset' || $key == 'size')
+                    {
+                        // limit 强制int， 其他全部选择string类型绑定
+                        $type = PDO::PARAM_INT;
+                    }
+                    if (!$this->pdoStatement->bindValue(':' . $key, $val, $type))
                     {
                         return false;
                     }
@@ -391,14 +414,14 @@ class Pdo_MySQL
      *
      * @param int $style 返回数据类型,默认数据
      *
-     * @return bool 结果
+     * @return bool|array 结果
      */
     public function findAll($style = PDO::FETCH_ASSOC)
     {
         $res = false;
         if ($this->execute())
         {
-            $res = $this->pdoStatement->fetchAll($style);
+            $res = $this->getPdoStatement()->fetchAll($style);
             $res = $res === false ? array() : $res;
         }
 
@@ -418,7 +441,7 @@ class Pdo_MySQL
         $res = false;
         if ($this->execute())
         {
-            $res = $this->pdoStatement->fetch($style);
+            $res = $this->getPdoStatement()->fetch($style);
             $res = $res === false ? array() : $res;
         }
 
@@ -436,7 +459,7 @@ class Pdo_MySQL
         $res = false;
         if ($this->execute())
         {
-            $res = $this->pdoStatement->fetchColumn();
+            $res = $this->getPdoStatement()->fetchColumn();
             $res = $res === false ? null : $res;
         }
 
@@ -451,7 +474,7 @@ class Pdo_MySQL
      */
     public function beginTransaction()
     {
-        return $this->pdo->beginTransaction();
+        return $this->getPdo()->beginTransaction();
     }
 
     /**
@@ -462,7 +485,7 @@ class Pdo_MySQL
      */
     public function commit()
     {
-        return $this->pdo->commit();
+        return $this->getPdo()->commit();
     }
 
     /**
@@ -473,7 +496,7 @@ class Pdo_MySQL
      */
     public function rollback()
     {
-        return $this->pdo->rollback();
+        return $this->getPdo()->rollback();
     }
 
     /**
@@ -484,7 +507,7 @@ class Pdo_MySQL
      */
     public function inTransaction()
     {
-        return $this->pdo->inTransaction();
+        return $this->getPdo()->inTransaction();
     }
 
     /**
@@ -495,12 +518,7 @@ class Pdo_MySQL
      */
     public function lastInsertId()
     {
-        if ($this->execute())
-        {
-            return $this->pdo->lastInsertId();
-        }
-
-        return false;
+        return $this->getPdo()->lastInsertId();
     }
 
     /**
@@ -511,12 +529,12 @@ class Pdo_MySQL
      */
     public function affectedRows()
     {
+        $res = false;
         if ($this->execute())
         {
-            return $this->pdoStatement->rowCount();
+            $res = $this->getPdoStatement()->rowCount();
         }
-
-        return false;
+        return $res;
     }
 
     /**
@@ -530,6 +548,27 @@ class Pdo_MySQL
         if ($this->isDebug)
         {
             echo $msg;
+            $this->debug();
         }
+    }
+
+    /**
+     * 功    能：debug一下信息
+     * 修改日期：2017-6-10
+     *
+     * output something for debuging...
+     */
+    public function debug()
+    {
+        $output = array(
+            'sql' => $this->sql,
+            'data' => $this->data,
+            'pdo' => $this->getPdo(),
+            'stmt' => $this->getPdoStatement(),
+            'errorInfo' => $this->getPdoStatement()->errorInfo()
+        );
+        echo '############################# debuging start #############################' . '<pre>';
+        var_export($output);
+        echo '</pre>' . '############################# debuging end #############################';
     }
 }
